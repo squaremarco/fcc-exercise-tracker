@@ -4,9 +4,9 @@ const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
 const { connect } = require('mongoose');
-const { pipe, omitBy, isDate, isNil, isEmpty, overSome, negate, cond, constant, T, identity } = require('lodash/fp');
+const { omitBy, size, conformsTo, toNumber, cond, constant, T, identity, pipe } = require('lodash/fp');
 
-const { isNilOrEmpty } = require('./utils');
+const { isNilOrEmpty, isNotNilOrEmpty } = require('./utils');
 const { User, Exercise } = require('./model');
 
 const app = express();
@@ -21,54 +21,101 @@ app.use(cors());
 app.use(express.static('public'));
 app.use(bodyParser.urlencoded({ extended: true }));
 
-app.get('/', (req, res) => {
+app.get('/', (_, res) => {
   res.sendFile(__dirname + '/views/index.html');
 });
 
 app.get('/api/exercise/users', async (_, res) => {
   try {
-    res.json(await User.find());
+    return res.json(await User.find());
   } catch ({ message, stack }) {
-    res.json({ error: `couldn't retrieve user list`, e: { message, stack } });
+    return res.json({ error: `couldn't retrieve user list`, e: { message, stack } });
   }
 });
 
-app.get('/api/exercise/log', async (req, res) => {
+app.get('/api/exercise/log', async ({ query } = {}, res) => {
   try {
-    const { userId, from, to, limit } = req.query || {};
+    if (!conformsTo({ userId: isNotNilOrEmpty }, query)) throw new Error('userId parameter is mandatory!');
 
-    if (isNilOrEmpty(userId)) throw new Error('userId parameter is mandatory!');
+    const { userId, from, to, limit } = query;
 
     const dateFilter = pipe(
-      omitBy(overSome(negate(isDate), isNil)),
+      omitBy(isNilOrEmpty),
       cond([
-        [isEmpty, constant(null)],
+        [isNilOrEmpty, constant(null)],
         [T, identity],
       ])
     )({
-      $gte: from ? new Date(from) : null,
-      $lte: to ? new Date(to) : null,
+      $gte: from,
+      $lte: to,
     });
 
-    res.json(await Exercise.find(omitBy(isNilOrEmpty, { userId, date: dateFilter }), null, { limit }));
+    const { _id, username } = await User.findById(userId, 'username');
+    const log = await Exercise.find(
+      omitBy(isNilOrEmpty, { userId, date: dateFilter }),
+      'description duration date -_id',
+      {
+        limit: toNumber(limit),
+      }
+    );
+
+    return res.json({ _id, username, count: size(log), log });
   } catch ({ message, stack }) {
-    res.json({ error: `couldn't retrieve user list`, e: { message, stack } });
+    return res.json({ error: `couldn't retrieve user logs`, e: { message, stack } });
   }
 });
 
 app.post('/api/exercise/add', async ({ body } = {}, res) => {
   try {
-    res.json(await Exercise.create(body));
+    if (
+      !conformsTo(
+        {
+          userId: isNotNilOrEmpty,
+          description: isNotNilOrEmpty,
+          duration: isNotNilOrEmpty,
+        },
+        body
+      )
+    ) {
+      throw new Error(`userId, description and duration  fields are mandatory! body: ${body}`);
+    }
+
+    const { userId, description: descr, duration: dur, date: d } = body;
+
+    const { _id, username } = (await User.findById(userId)) || {};
+
+    if (isNilOrEmpty(username)) throw new Error(`user doesn't exists`);
+
+    const { description, duration, date } = await Exercise.create({
+      userId,
+      date: isNotNilOrEmpty(d) ? d : undefined,
+      duration: dur,
+      description: descr,
+    });
+
+    return res.json({
+      _id,
+      username,
+      date,
+      duration,
+      description,
+    });
   } catch ({ message, stack }) {
-    res.json({ error: `couldn't create new user`, e: { message, stack } });
+    return res.json({ error: `couldn't create new exercise`, e: { message, stack } });
   }
 });
 
 app.post('/api/exercise/new-user', async ({ body } = {}, res) => {
   try {
-    res.json(await User.create(body));
+    if (!conformsTo({ username: isNotNilOrEmpty }, body)) throw new Error('username parameter is mandatory!');
+
+    const { username } = body;
+
+    if (await User.findOne({ username })) throw new Error('username is already taken');
+
+    return res.json(await User.create(body));
   } catch ({ message, stack }) {
-    res.json({ error: `couldn't create new user`, e: { message, stack } });
+    return res.json({ error: `couldn't create new user`, e: { message, stack } });
   }
 });
 
